@@ -50,9 +50,6 @@ jobs:
         run: |
           set -euo pipefail
           cd build/termux-app
-          PACKAGE='com.zyvora.ultra.terminal'
-          APP_NAME='ZYVORA ULTRA Terminal'
-
           python3 - <<'PY'
           from pathlib import Path
 
@@ -61,16 +58,19 @@ jobs:
 
           p = Path('app/build.gradle')
           s = p.read_text()
-          s = s.replace('namespace "com.termux"', 'namespace "com.termux"\n\n    defaultConfig {\n        applicationId "' + package + '"')
-          s = s.replace('    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion', '    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion')
-          s = s.replace('        manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"', '        manifestPlaceholders.TERMUX_PACKAGE_NAME = "' + package + '"')
-          s = s.replace('        manifestPlaceholders.TERMUX_APP_NAME = "Termux"', '        manifestPlaceholders.TERMUX_APP_NAME = "' + app_name + '"')
-          # The upstream file already has defaultConfig; undo the temporary duplicate block if introduced.
-          s = s.replace('    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion project.properties.minSdkVersion.toInteger()\n        targetSdkVersion project.properties.targetSdkVersion.toInteger()', '    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion project.properties.minSdkVersion.toInteger()\n        targetSdkVersion project.properties.targetSdkVersion.toInteger()')
+          marker = '    defaultConfig {\n        minSdkVersion project.properties.minSdkVersion.toInteger()'
+          replacement = '    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion project.properties.minSdkVersion.toInteger()'
+          if marker not in s:
+              raise SystemExit('Termux app/build.gradle defaultConfig marker not found')
+          s = s.replace(marker, replacement, 1)
+          s = s.replace('        manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"', '        manifestPlaceholders.TERMUX_PACKAGE_NAME = "' + package + '"', 1)
+          s = s.replace('        manifestPlaceholders.TERMUX_APP_NAME = "Termux"', '        manifestPlaceholders.TERMUX_APP_NAME = "' + app_name + '"', 1)
           p.write_text(s)
 
           p = Path('termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java')
-          s = p.read_text().replace('public static final String TERMUX_APP_NAME = "Termux";', 'public static final String TERMUX_APP_NAME = "' + app_name + '";').replace('public static final String TERMUX_PACKAGE_NAME = "com.termux";', 'public static final String TERMUX_PACKAGE_NAME = "' + package + '";')
+          s = p.read_text()
+          s = s.replace('public static final String TERMUX_APP_NAME = "Termux";', 'public static final String TERMUX_APP_NAME = "' + app_name + '";', 1)
+          s = s.replace('public static final String TERMUX_PACKAGE_NAME = "com.termux";', 'public static final String TERMUX_PACKAGE_NAME = "' + package + '";', 1)
           p.write_text(s)
 
           for path in [Path('app/src/main/res/values/strings.xml'), Path('termux-shared/src/main/res/values/strings.xml')]:
@@ -78,15 +78,14 @@ jobs:
               path.write_text(s)
 
           p = Path('app/src/main/res/xml/shortcuts.xml')
-          s = p.read_text().replace('com.termux', package)
-          p.write_text(s)
+          p.write_text(p.read_text().replace('com.termux', package))
           PY
 
-          # Confirm the package identity was actually changed and the source packages remain intact.
           grep -Fq 'applicationId "com.zyvora.ultra.terminal"' app/build.gradle
           grep -Fq 'TERMUX_PACKAGE_NAME = "com.zyvora.ultra.terminal"' termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
-          grep -Fq 'ZYVORA ULTRA Terminal' app/build.gradle
+          grep -Fq 'manifestPlaceholders.TERMUX_APP_NAME = "ZYVORA ULTRA Terminal"' app/build.gradle
           test -f LICENSE.md
+          echo 'ZYVORA branding patch: PASS' | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Build upstream Termux fork
         shell: bash
