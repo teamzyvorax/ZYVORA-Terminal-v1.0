@@ -11,7 +11,7 @@ android {
         minSdk 26
         targetSdk 37
         versionCode 2
-        versionName '1.2.0'
+        versionName '2.0.0'
     }
 
     buildTypes {
@@ -28,4 +28,13 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+
+    packagingOptions {
+        resources.excludes += ['META-INF/LICENSE*', 'META-INF/NOTICE*']
+    }
+}
+
+dependencies {
+    implementation 'com.termux.termux-app:terminal-view:0.118.0'
+    implementation 'androidx.annotation:annotation:1.9.1'
 }
