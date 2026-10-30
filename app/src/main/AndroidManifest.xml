@@ -5,7 +5,6 @@
     <application
         android:allowBackup="true"
         android:label="ZYVORA ULTRA Terminal"
-        android:description="Advanced Android Terminal"
         android:supportsRtl="true"
         android:usesCleartextTraffic="false"
         android:theme="@style/AppTheme">
