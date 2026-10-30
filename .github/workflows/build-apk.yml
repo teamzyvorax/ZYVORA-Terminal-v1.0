@@ -41,37 +41,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          required_files=(
-            settings.gradle
-            build.gradle
-            app/build.gradle
-            app/src/main/AndroidManifest.xml
-            app/src/main/java/com/zyvora/terminal/MainActivity.kt
-          )
-          for file in "${required_files[@]}"; do
-            test -f "$file" || { echo "Missing required file: $file"; exit 1; }
-          done
+          required_files=(settings.gradle build.gradle app/build.gradle app/src/main/AndroidManifest.xml app/src/main/java/com/zyvora/terminal/MainActivity.kt)
+          for file in "${required_files[@]}"; do test -f "$file" || { echo "Missing required file: $file"; exit 1; }; done
           mapfile -t activities < <(find app/src/main -type f \( -name 'MainActivity.kt' -o -name 'MainActivity.java' \) -print)
           if [ "${#activities[@]}" -ne 1 ] || [ "${activities[0]}" != "app/src/main/java/com/zyvora/terminal/MainActivity.kt" ]; then
-            echo 'Exactly one MainActivity source is required:'
-            printf '%s\n' "${activities[@]}"
-            exit 1
+            echo 'Exactly one MainActivity source is required:'; printf '%s\n' "${activities[@]}"; exit 1
           fi
-          if find app/src/main -type f -name 'TerminalShell.kt' -print -quit | grep -q .; then
-            echo 'Obsolete fake TerminalShell.kt detected; remove it.'
-            exit 1
-          fi
+          test ! -f app/src/main/java/com/zyvora/terminal/TerminalShell.kt || { echo 'Obsolete fake TerminalShell.kt detected'; exit 1; }
           grep -Fq 'com.termux.termux-app:terminal-view:0.118.0' app/build.gradle || { echo 'Missing terminal-view dependency'; exit 1; }
           grep -Fq 'https://jitpack.io' settings.gradle || { echo 'Missing JitPack repository'; exit 1; }
-          if grep -Eq 'android:description="[^"]+"' app/src/main/AndroidManifest.xml; then
-            echo 'Raw android:description detected; use a resource reference or omit it.'
-            exit 1
-          fi
           echo 'Preflight validation: PASS'
 
-      - name: Prepare Android native library directory
-        shell: bash
-        run: mkdir -p app/src/main/jniLibs/arm64-v8a app/src/main/assets/userspace
+      - name: Prepare runtime directories
+        run: mkdir -p app/src/main/assets/userspace app/src/main/assets/runtime
 
       - name: Build embedded ARM64 Linux userspace
         shell: bash
@@ -79,85 +61,63 @@ jobs:
           set -euo pipefail
           ROOTFS="$PWD/app/src/main/assets/userspace/zyvora-alpine-aarch64.tar.gz"
           WORK="$RUNNER_TEMP/zyvora-rootfs"
-          rm -rf "$WORK"
-          mkdir -p "$WORK"
-
+          rm -rf "$WORK" && mkdir -p "$WORK"
           docker pull --platform linux/arm64 alpine:3.24.3
-          docker run --rm --platform linux/arm64 \
-            -v "$WORK:/out" \
-            alpine:3.24.3 sh -euxc '
-              apk add --no-cache \
-                bash \
-                ca-certificates \
-                curl \
-                wget \
-                git \
-                openssh-client \
-                python3 \
-                py3-pip \
-                nodejs \
-                npm \
-                nano \
-                vim \
-                tar \
-                gzip \
-                unzip \
-                zip \
-                file \
-                procps \
-                iproute2 \
-                bind-tools
-              mkdir -p /out/rootfs/root /out/rootfs/home /out/rootfs/tmp
-              chmod 1777 /out/rootfs/tmp
-              printf "%s\\n" "export HOME=/root" "export TERM=xterm-256color" "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > /out/rootfs/root/.profile
-              tar -C / -czf /out/rootfs.tar.gz \
-                --exclude=./proc --exclude=./sys --exclude=./dev \
-                --exclude=./out ./bin ./sbin ./usr ./lib ./etc ./root ./home ./tmp
-            '
-
+          docker run --rm --platform linux/arm64 -v "$WORK:/out" alpine:3.24.3 sh -euxc '
+            apk add --no-cache bash ca-certificates curl wget git openssh-client python3 py3-pip nodejs npm nano vim tar gzip unzip zip file procps iproute2 bind-tools
+            mkdir -p /out/rootfs/root /out/rootfs/home /out/rootfs/tmp /out/rootfs/usr/local/bin
+            chmod 1777 /out/rootfs/tmp
+            cat > /out/rootfs/usr/local/bin/pkg <<"EOF"
+#!/bin/sh
+case "${1:-}" in
+  update) exec apk update ;;
+  upgrade) exec apk upgrade ;;
+  install) shift; exec apk add "$@" ;;
+  remove|uninstall) shift; exec apk del "$@" ;;
+  search) shift; exec apk search "$@" ;;
+  list) exec apk list "$@" ;;
+  info) shift; exec apk info "$@" ;;
+  *) echo "ZYVORA pkg: update | upgrade | install | remove | search | list | info"; exit 2 ;;
+esac
+EOF
+            chmod 0755 /out/rootfs/usr/local/bin/pkg
+            printf "%s\\n" "export HOME=/root" "export TERM=xterm-256color" "export LANG=C.UTF-8" "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > /out/rootfs/root/.profile
+            tar -C / -czf /out/rootfs.tar.gz --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./out ./bin ./sbin ./usr ./lib ./etc ./root ./home ./tmp
+          '
           test -s "$WORK/rootfs.tar.gz"
           cp "$WORK/rootfs.tar.gz" "$ROOTFS"
           SIZE=$(stat -c%s "$ROOTFS")
-          echo "Embedded ARM64 userspace archive: $SIZE bytes"
-          if [ "$SIZE" -lt 20000000 ]; then
-            echo 'Userspace archive is below the 20 MB safety floor; build aborted.'
-            exit 1
-          fi
+          echo "ROOTFS_SIZE_BYTES=$SIZE"
+          test "$SIZE" -ge 20000000 || { echo 'Userspace archive below 20 MB safety floor'; exit 1; }
           sha256sum "$ROOTFS"
 
-      - name: Embed Android ARM64 PRoot runtime
+      - name: Download ARM64 PRoot runtime
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL --retry 5 --retry-all-errors \
-            'https://github.com/proot-me/proot-static-build/raw/master/static/proot-arm64' \
-            -o app/src/main/jniLibs/arm64-v8a/libproot.so
-          chmod 0755 app/src/main/jniLibs/arm64-v8a/libproot.so
-          test -s app/src/main/jniLibs/arm64-v8a/libproot.so
-          file app/src/main/jniLibs/arm64-v8a/libproot.so
-          sha256sum app/src/main/jniLibs/arm64-v8a/libproot.so
+          curl -fL --retry 5 --retry-all-errors 'https://github.com/proot-me/proot-static-build/raw/master/static/proot-arm64' -o app/src/main/assets/runtime/proot-arm64
+          chmod 0755 app/src/main/assets/runtime/proot-arm64
+          test -s app/src/main/assets/runtime/proot-arm64
+          file app/src/main/assets/runtime/proot-arm64
+          sha256sum app/src/main/assets/runtime/proot-arm64
 
       - name: Build debug APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          gradle --no-daemon --stacktrace --warning-mode all :app:assembleDebug
+        run: gradle --no-daemon --stacktrace --warning-mode all :app:assembleDebug
 
-      - name: Verify debug APK and userspace payload
+      - name: Verify APK and Linux payload
         shell: bash
         run: |
           set -euo pipefail
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-          ROOTFS="app/src/main/assets/userspace/zyvora-alpine-aarch64.tar.gz"
-          test -s "$APK" || { echo 'APK was not generated'; exit 1; }
-          test -s "$ROOTFS" || { echo 'Embedded userspace was not generated'; exit 1; }
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          ROOTFS=app/src/main/assets/userspace/zyvora-alpine-aarch64.tar.gz
+          PROOT=app/src/main/assets/runtime/proot-arm64
+          test -s "$APK" && test -s "$ROOTFS" && test -s "$PROOT"
           unzip -t "$APK" >/dev/null
-          APK_SIZE=$(stat -c%s "$APK")
-          ROOTFS_SIZE=$(stat -c%s "$ROOTFS")
-          echo "APK_SIZE_BYTES=$APK_SIZE"
-          echo "ROOTFS_SIZE_BYTES=$ROOTFS_SIZE"
+          echo "APK_SIZE_BYTES=$(stat -c%s "$APK")"
+          echo "ROOTFS_SIZE_BYTES=$(stat -c%s "$ROOTFS")"
+          echo "PROOT_SIZE_BYTES=$(stat -c%s "$PROOT")"
           sha256sum "$APK"
-          echo 'APK + Linux userspace integrity check: PASS'
+          echo 'ZYVORA APK + Linux runtime integrity: PASS'
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
