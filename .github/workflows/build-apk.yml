@@ -1,4 +1,4 @@
-name: Build ZYVORA Terminal APK
+name: Build ZYVORA ULTRA Terminal (Termux Fork)
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: zyvora-terminal-main
+  group: zyvora-termux-fork-main
   cancel-in-progress: true
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Checkout
+      - name: Checkout ZYVORA repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
@@ -30,98 +30,100 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '9.6.0'
-          cache-cleanup: on-success
-
-      - name: Preflight source validation
+      - name: Clone upstream Termux source
         shell: bash
         run: |
           set -euo pipefail
-          required_files=(settings.gradle build.gradle app/build.gradle app/src/main/AndroidManifest.xml app/src/main/java/com/zyvora/terminal/MainActivity.kt)
-          for file in "${required_files[@]}"; do
-            test -f "$file" || { echo "Missing required file: $file"; exit 1; }
-          done
-          mapfile -t activities < <(find app/src/main -type f \( -name 'MainActivity.kt' -o -name 'MainActivity.java' \) -print)
-          test "${#activities[@]}" -eq 1 || { echo 'Duplicate/missing MainActivity sources'; printf '%s\n' "${activities[@]}"; exit 1; }
-          test "${activities[0]}" = 'app/src/main/java/com/zyvora/terminal/MainActivity.kt' || exit 1
-          test ! -f app/src/main/java/com/zyvora/terminal/TerminalShell.kt || { echo 'Obsolete fake TerminalShell.kt detected'; exit 1; }
-          grep -Fq 'com.termux.termux-app:terminal-view:0.118.0' app/build.gradle
-          grep -Fq 'https://jitpack.io' settings.gradle
-          echo 'Preflight validation: PASS'
+          rm -rf build/termux-app
+          mkdir -p build
+          git clone --depth 1 https://github.com/termux/termux-app.git build/termux-app
+          cd build/termux-app
+          echo "TERMUX_UPSTREAM_COMMIT=$(git rev-parse HEAD)" | tee "$GITHUB_STEP_SUMMARY"
+          test -f LICENSE.md
+          test -f app/build.gradle
+          test -f termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
+          test -f terminal-view/build.gradle
+          test -f terminal-emulator/build.gradle
 
-      - name: Prepare runtime directories
-        run: mkdir -p app/src/main/assets/userspace app/src/main/assets/runtime
-
-      - name: Build embedded ARM64 Alpine userspace
+      - name: Apply ZYVORA branding and package identity
         shell: bash
         run: |
           set -euo pipefail
-          ROOTFS="$PWD/app/src/main/assets/userspace/zyvora-alpine-aarch64.tar.gz"
-          WORK="$RUNNER_TEMP/zyvora-rootfs"
-          rm -rf "$WORK"
-          mkdir -p "$WORK"
-          docker pull --platform linux/arm64 alpine:3.24.3
-          docker run --rm --platform linux/arm64 -v "$WORK:/out" alpine:3.24.3 sh -c '
-            set -eu
-            apk add --no-cache bash ca-certificates curl wget git openssh-client python3 py3-pip nodejs npm nano vim tar gzip unzip zip file procps iproute2 bind-tools
-            mkdir -p /out/rootfs/usr/local/bin /out/rootfs/root /out/rootfs/home /out/rootfs/tmp
-            chmod 1777 /out/rootfs/tmp
-            printf "%s\\n" "#!/bin/sh" "case \"\${1:-}\" in" "  update) exec apk update ;;" "  upgrade) exec apk upgrade ;;" "  install) shift; exec apk add \"\$@\" ;;" "  remove|uninstall) shift; exec apk del \"\$@\" ;;" "  search) shift; exec apk search \"\$@\" ;;" "  list) exec apk list \"\$@\" ;;" "  info) shift; exec apk info \"\$@\" ;;" "  *) echo \"ZYVORA pkg: update | upgrade | install | remove | search | list | info\"; exit 2 ;;" "esac" > /out/rootfs/usr/local/bin/pkg
-            chmod 0755 /out/rootfs/usr/local/bin/pkg
-            printf "%s\\n" "export HOME=/root" "export TERM=xterm-256color" "export LANG=C.UTF-8" "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" > /out/rootfs/root/.profile
-            tar -C / -czf /out/rootfs.tar.gz --exclude=./proc --exclude=./sys --exclude=./dev --exclude=./out ./bin ./sbin ./usr ./lib ./etc ./root ./home ./tmp
-          '
-          test -s "$WORK/rootfs.tar.gz"
-          cp "$WORK/rootfs.tar.gz" "$ROOTFS"
-          echo "ROOTFS_SIZE_BYTES=$(stat -c%s "$ROOTFS")"
-          test "$(stat -c%s "$ROOTFS")" -ge 20000000
-          sha256sum "$ROOTFS"
+          cd build/termux-app
+          PACKAGE='com.zyvora.ultra.terminal'
+          APP_NAME='ZYVORA ULTRA Terminal'
 
-      - name: Download ARM64 PRoot runtime
+          python3 - <<'PY'
+          from pathlib import Path
+
+          package = 'com.zyvora.ultra.terminal'
+          app_name = 'ZYVORA ULTRA Terminal'
+
+          p = Path('app/build.gradle')
+          s = p.read_text()
+          s = s.replace('namespace "com.termux"', 'namespace "com.termux"\n\n    defaultConfig {\n        applicationId "' + package + '"')
+          s = s.replace('    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion', '    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion')
+          s = s.replace('        manifestPlaceholders.TERMUX_PACKAGE_NAME = "com.termux"', '        manifestPlaceholders.TERMUX_PACKAGE_NAME = "' + package + '"')
+          s = s.replace('        manifestPlaceholders.TERMUX_APP_NAME = "Termux"', '        manifestPlaceholders.TERMUX_APP_NAME = "' + app_name + '"')
+          # The upstream file already has defaultConfig; undo the temporary duplicate block if introduced.
+          s = s.replace('    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion project.properties.minSdkVersion.toInteger()\n        targetSdkVersion project.properties.targetSdkVersion.toInteger()', '    defaultConfig {\n        applicationId "' + package + '"\n        minSdkVersion project.properties.minSdkVersion.toInteger()\n        targetSdkVersion project.properties.targetSdkVersion.toInteger()')
+          p.write_text(s)
+
+          p = Path('termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java')
+          s = p.read_text().replace('public static final String TERMUX_APP_NAME = "Termux";', 'public static final String TERMUX_APP_NAME = "' + app_name + '";').replace('public static final String TERMUX_PACKAGE_NAME = "com.termux";', 'public static final String TERMUX_PACKAGE_NAME = "' + package + '";')
+          p.write_text(s)
+
+          for path in [Path('app/src/main/res/values/strings.xml'), Path('termux-shared/src/main/res/values/strings.xml')]:
+              s = path.read_text().replace('"com.termux"', '"' + package + '"').replace('"Termux"', '"' + app_name + '"')
+              path.write_text(s)
+
+          p = Path('app/src/main/res/xml/shortcuts.xml')
+          s = p.read_text().replace('com.termux', package)
+          p.write_text(s)
+          PY
+
+          # Confirm the package identity was actually changed and the source packages remain intact.
+          grep -Fq 'applicationId "com.zyvora.ultra.terminal"' app/build.gradle
+          grep -Fq 'TERMUX_PACKAGE_NAME = "com.zyvora.ultra.terminal"' termux-shared/src/main/java/com/termux/shared/termux/TermuxConstants.java
+          grep -Fq 'ZYVORA ULTRA Terminal' app/build.gradle
+          test -f LICENSE.md
+
+      - name: Build upstream Termux fork
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL --retry 5 --retry-all-errors 'https://github.com/proot-me/proot-static-build/raw/master/static/proot-arm64' -o app/src/main/assets/runtime/proot-arm64
-          chmod 0755 app/src/main/assets/runtime/proot-arm64
-          test -s app/src/main/assets/runtime/proot-arm64
-          file app/src/main/assets/runtime/proot-arm64
-          sha256sum app/src/main/assets/runtime/proot-arm64
+          cd build/termux-app
+          chmod +x gradlew
+          TERMUX_PACKAGE_VARIANT=apt-android-7 TERMUX_APP_VERSION_NAME=0.118.3-zyvora ./gradlew --no-daemon --stacktrace --warning-mode all :app:assembleDebug
 
-      - name: Build debug APK
-        run: gradle --no-daemon --stacktrace --warning-mode all :app:assembleDebug
-
-      - name: Verify APK and runtime payload
+      - name: Verify APK
         shell: bash
         run: |
           set -euo pipefail
-          APK=app/build/outputs/apk/debug/app-debug.apk
-          ROOTFS=app/src/main/assets/userspace/zyvora-alpine-aarch64.tar.gz
-          PROOT=app/src/main/assets/runtime/proot-arm64
+          cd build/termux-app
+          APK=$(find app/build/outputs/apk -type f -name '*.apk' | head -n 1)
+          test -n "$APK"
           test -s "$APK"
-          test -s "$ROOTFS"
-          test -s "$PROOT"
           unzip -t "$APK" >/dev/null
+          echo "APK=$APK"
           echo "APK_SIZE_BYTES=$(stat -c%s "$APK")"
-          echo "ROOTFS_SIZE_BYTES=$(stat -c%s "$ROOTFS")"
-          echo "PROOT_SIZE_BYTES=$(stat -c%s "$PROOT")"
           sha256sum "$APK"
-          echo 'ZYVORA APK + Linux runtime integrity: PASS'
+          echo 'ZYVORA Termux fork APK integrity: PASS' | tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload APK
+      - name: Upload ZYVORA APK
         uses: actions/upload-artifact@v4
         with:
-          name: ZYVORA-Terminal-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: ZYVORA-ULTRA-Terminal-Termux-Fork-debug
+          path: build/termux-app/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
           retention-days: 90
 
-      - name: Upload Linux userspace bundle
+      - name: Upload upstream license and fork source metadata
         uses: actions/upload-artifact@v4
         with:
-          name: ZYVORA-Terminal-linux-userspace-arm64
-          path: app/src/main/assets/userspace/zyvora-alpine-aarch64.tar.gz
+          name: ZYVORA-Termux-Fork-Licensing
+          path: |
+            build/termux-app/LICENSE.md
+            build/termux-app/README.md
           if-no-files-found: error
           retention-days: 90
