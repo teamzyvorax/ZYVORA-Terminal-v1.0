@@ -40,25 +40,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f settings.gradle
-          test -f build.gradle
-          test -f app/build.gradle
-          test -f app/src/main/AndroidManifest.xml
-          test -f app/src/main/java/com/zyvora/terminal/MainActivity.kt
-
-          # Exactly one MainActivity source is allowed.
-          count=$(find app/src/main -type f \( -name 'MainActivity.kt' -o -name 'MainActivity.java' \) | wc -l)
-          test "$count" -eq 1
-
-          # Android manifest description must be a resource reference, not raw text.
+          test -f settings.gradle || { echo 'Missing settings.gradle'; exit 1; }
+          test -f build.gradle || { echo 'Missing root build.gradle'; exit 1; }
+          test -f app/build.gradle || { echo 'Missing app/build.gradle'; exit 1; }
+          test -f app/src/main/AndroidManifest.xml || { echo 'Missing AndroidManifest.xml'; exit 1; }
+          test -f app/src/main/java/com/zyvora/terminal/MainActivity.kt || { echo 'Missing MainActivity.kt'; exit 1; }
+          test ! -f app/src/main/java/com/zyvora/terminal/MainActivity.java || { echo 'Duplicate MainActivity.java detected'; exit 1; }
+          grep -Fq "com.termux.termux-app:terminal-view:0.118.0" app/build.gradle || { echo 'Missing terminal-view dependency'; exit 1; }
+          grep -Fq "https://jitpack.io" settings.gradle || { echo 'Missing JitPack repository'; exit 1; }
           if grep -Eq 'android:description="[^"]+"' app/src/main/AndroidManifest.xml; then
-            echo 'ERROR: android:description must not contain raw text.'
+            echo 'Raw android:description detected; use a resource reference or omit it.'
             exit 1
           fi
-
-          # The real terminal dependency and JitPack repository must remain present.
-          grep -Fq "com.termux.termux-app:terminal-view:0.118.0" app/build.gradle
-          grep -Fq "https://jitpack.io" settings.gradle
+          echo 'Preflight validation: PASS'
 
       - name: Build debug APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
@@ -68,9 +62,10 @@ jobs:
         run: |
           set -euo pipefail
           APK="app/build/outputs/apk/debug/app-debug.apk"
-          test -s "$APK"
+          test -s "$APK" || { echo 'APK was not generated'; exit 1; }
           sha256sum "$APK"
           unzip -t "$APK" >/dev/null
+          echo 'APK integrity check: PASS'
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
